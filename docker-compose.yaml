@@ -1,0 +1,37 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres
+    container_name: 'postgres'
+    environment:
+      - POSTGRES_USER=${PG_USER}
+      - POSTGRES_PASSWORD=${PG_PASSWORD}
+      - POSTGRES_DB=${PG_DB}
+    healthcheck:
+      test: ['CMD-SHELL', "sh -c 'pg_isready -U ${PG_USER} -d ${PG_DB}'"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - network
+    ports:
+      - '5432:5432'
+    restart: always
+    volumes:
+      - .docker/postgres/data:/var/lib/postgresql/data
+
+  adminer:
+    image: adminer
+    container_name: 'adminer'
+    depends_on:
+      - postgres
+    networks:
+      - network
+    ports:
+      - 8080:8080
+    restart: always
+
+networks:
+  network:
+    driver: bridge

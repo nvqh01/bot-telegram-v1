@@ -1,0 +1,6 @@
+.docker
+.puppeteer
+migrations
+node_modules
+
+.env
