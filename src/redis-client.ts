@@ -64,4 +64,24 @@ export class RedisClient {
       return true;
     });
   }
+
+  async sadd(key: string, values: string[]): Promise<boolean | null> {
+    return await catchAsync(this.context, async () => {
+      await this.client.sadd(key, values);
+      return true;
+    });
+  }
+
+  async smembers(key: string): Promise<string[] | null> {
+    return await catchAsync(this.context, async () => {
+      return await this.client.smembers(key);
+    });
+  }
+
+  async srem(key: string, values: string[]): Promise<boolean | null> {
+    return await catchAsync(this.context, async () => {
+      await this.client.srem(key, values);
+      return true;
+    });
+  }
 }
