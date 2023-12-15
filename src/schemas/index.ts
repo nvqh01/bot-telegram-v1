@@ -54,7 +54,7 @@ export const taskSchema = pgTable(
 
 export const twitterCookieSchema = pgTable('twitter_cookies', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
-  username: varchar('username', { length: 50 }).unique().notNull(),
+  username: varchar('username', { length: 50 }).unique(),
   password: varchar('password', { length: 50 }).notNull(),
   cookies: varchar('cookies', { length: 500 }).default('').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -64,6 +64,7 @@ export const userSchema = pgTable(
   'users',
   {
     id: varchar('id', { length: 100 }).primaryKey(),
+    username: varchar('user_name', { length: 100 }).default('').notNull(),
     fullName: varchar('full_name', { length: 200 }).notNull(),
     twitterProfileLink: varchar('twitter_profile_link', {
       length: 200,
@@ -71,6 +72,7 @@ export const userSchema = pgTable(
       .default('')
       .notNull(),
     isAdmin: boolean('is_admin').default(false).notNull(),
+    isGroupAdmin: boolean('is_group_admin').default(false).notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (table) => {

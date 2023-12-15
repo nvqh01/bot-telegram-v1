@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import moment from 'moment';
 import { Assignment, TelegramBot } from './bot';
 import { crawlHtml, getRoundRobin } from './utils';
@@ -5,7 +6,7 @@ import { sql } from 'drizzle-orm';
 import { PgClient } from './pg-client';
 import { RedisClient } from './redis-client';
 import { schedule, ScheduledTask } from 'node-cron';
-import { resultSchema, twitterCookieSchema } from './schemas';
+import { resultSchema, twitterCookieSchema, userSchema } from './schemas';
 
 // const users: User[] = [
 //   {
@@ -48,6 +49,8 @@ const COOKIES: any[] = [
   },
 ];
 
+const errorReceiverTelegramId = process.env.ERROR_RECEIVER_TELEGRAM_ID || '';
+
 const cronJobs: ScheduledTask[] = [];
 
 const pgClient = PgClient.getInstance();
@@ -83,7 +86,18 @@ cronJobs.push(
       const lishHtml = await crawlHtml(
         [shareLink, commentLink, likeLink],
         cookies,
-      );
+      ).catch((error: any) => {
+        const errorMessage = `Fail to check assignments of user "${assignment.userId}" at group "${assignment.groupId}" because of ${error.stack}`;
+
+        console.log(errorMessage);
+
+        errorReceiverTelegramId &&
+          telegramBot.sendMessage(errorReceiverTelegramId, errorMessage);
+
+        return [];
+      });
+
+      if (!lishHtml.length) continue;
 
       let totalPoints = 0;
 
@@ -125,11 +139,50 @@ cronJobs.push(
   }),
 );
 
-process.on('SIGINT', () => release('SIGINT'));
-process.on('SIGTERM', () => release('SIGTERM'));
+process.on('SIGINT', () => {
+  console.log('Bot meets error from SIGINT.');
+  release('SIGTERM');
+});
 
-function release(reason: string): void {
-  cronJobs.forEach((job) => job.stop());
-  redisClient.release();
+process.on('SIGTERM', () => {
+  release('SIGTERM');
+  console.log('Restart bot.');
+  telegramBot.start();
+});
+
+function release(reason: string, stop: boolean = false): void {
+  if (stop) {
+    cronJobs.forEach((job) => job.stop());
+    redisClient.release();
+  }
+
   telegramBot.release(reason);
 }
+
+async function insertUser(): Promise<void> {
+  await pgClient
+    .insert(userSchema)
+    .values([
+      {
+        id: process.env.ADMIN_ID_1 as string,
+        fullName: 'MMOLoginS Long Ân',
+        isAdmin: true,
+        isGroupAdmin: true,
+      },
+      {
+        id: process.env.ADMIN_ID_2 as string,
+        fullName: 'Huy Nguyễn',
+        isAdmin: true,
+        isGroupAdmin: true,
+      },
+    ])
+    .catch((error: any) => {
+      const errorMessage = error.stack as string;
+
+      if (errorMessage.includes('duplicate')) return;
+
+      console.log('Fail to insert default users because of %s', errorMessage);
+    });
+}
+
+insertUser();

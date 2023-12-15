@@ -1,9 +1,15 @@
 import moment from 'moment';
-import { eq, ne, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { getTwitterCookies } from './utils';
+import { PgClient } from './pg-client';
+import { RedisClient } from './redis-client';
+import { Telegraf } from 'telegraf';
+import 'dotenv/config';
 import {
   NewGroup,
   NewResult,
   NewTask,
+  NewTwitterCookie,
   NewUser,
   Task,
   groupSchema,
@@ -12,11 +18,6 @@ import {
   twitterCookieSchema,
   userSchema,
 } from './schemas';
-import { PgClient } from './pg-client';
-import { RedisClient } from './redis-client';
-import { Telegraf } from 'telegraf';
-import 'dotenv/config';
-import { getTwitterCookies } from './utils';
 
 export type Assignment = {
   userId: string;
@@ -32,6 +33,7 @@ const redisClient = RedisClient.getInstance();
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const TTL_IN_MS = 2 * 24 * 60 * 60;
 
+const ADD_TWITTER_ACCOUNTS = /\/add-twitter-accounts( \".+:.+\"){1,}/gi;
 const ADD_TWITTER_PROFILE_LINK =
   /^\/add-twitter-profile-link \"http(s)?:\/\/twitter.com\/.+\"/gi;
 const CREATE_TASKS_PATTERN =
@@ -64,20 +66,71 @@ export class TelegramBot {
   private init(): void {
     this.bot = new Telegraf(BOT_TOKEN);
 
-    this.bot.hears(ADD_TWITTER_PROFILE_LINK, async (ctx) => {
-      const { id: groupId, type } = ctx.chat;
-      const { id: userId } = ctx.from;
+    this.bot.hears(ADD_TWITTER_ACCOUNTS, async (ctx) => {
+      const { id: userId, first_name, last_name } = ctx.from;
       const { text: command } = ctx.message;
-
-      if (type !== 'group')
-        return ctx.reply('You must join group to execute commands.');
+      const fullName = `${first_name} ${last_name}`;
+      const twitterAccounts: NewTwitterCookie[] = [];
 
       try {
-        const isExistedUser = await this.isExistedInCache(userId, 'user');
+        if (!(await this.canExecuteCommand(ctx, 'private'))) return;
 
-        if (!isExistedUser)
+        if (!(await this.isAdmin(userId)))
           return ctx.reply(
-            'You have not registerd yet. (Please enter /help to get more infomation)',
+            `User ${fullName} not admin. So you can not use command "/get-twitter-cookies".`,
+          );
+
+        command.split(' ').forEach((twitterAccount, index) => {
+          if (index === 0) return;
+          twitterAccount = twitterAccount.replaceAll('"', '');
+          const [username, password] = twitterAccount.split(':');
+          twitterAccounts.push({ username, password });
+        });
+
+        let numOfNewAccounts = 0;
+
+        await Promise.all(
+          twitterAccounts.map(async (twitterAccount) => {
+            await pgClient
+              .insert(twitterCookieSchema)
+              .values([twitterAccount])
+              .then(() => {
+                numOfNewAccounts++;
+              })
+              .catch(async (error: any) => {
+                const errorMessage = error.stack as string;
+                if (errorMessage.includes('duplicate')) {
+                  await ctx.reply(
+                    `Twitter username "${twitterAccount.username}" has already existed.`,
+                  );
+                  return;
+                }
+                throw error;
+              });
+          }),
+        );
+
+        return ctx.reply(`Added ${numOfNewAccounts} twitter accounts.`);
+      } catch (error: any) {
+        console.log('Fail to add twitter accounts because of %s.', error.stack);
+
+        return ctx.reply(
+          'Fail to add twitter accounts because server meets error.',
+        );
+      }
+    });
+
+    this.bot.hears(ADD_TWITTER_PROFILE_LINK, async (ctx) => {
+      const { id: userId, first_name, last_name } = ctx.from;
+      const { text: command } = ctx.message;
+      const fullName = `${first_name} ${last_name}`;
+
+      try {
+        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
+
+        if (!(await this.isExistedUser(userId)))
+          ctx.reply(
+            `User ${fullName} have not registerd yet. User must register by using command "/register".`,
           );
 
         const twitterProfileLink = command
@@ -88,64 +141,63 @@ export class TelegramBot {
 
         if (!twitterProfileLink)
           return ctx.reply(
-            'Your command have an invalid syntax. (Please enter /help to get more infomation)',
+            `Command of user ${fullName} has an invalid syntax. (Please enter /help to get more infomation)`,
           );
 
         await pgClient.update(userSchema).set({
           twitterProfileLink,
         });
 
-        return ctx.reply('You added twitter profile link.');
+        return ctx.reply(`User ${fullName} added twitter profile link.`);
       } catch (error: any) {
         console.log(
-          'User %s can not add twitter profile link because of %s.',
+          'User %s (id: %s) can not add twitter profile link because of %s.',
+          fullName,
           userId,
           error.stack,
         );
 
         return ctx.reply(
-          'You can not add twitter profile link because server meets error.',
+          `User ${fullName} can not add twitter profile link because server meets error.`,
         );
       }
     });
 
     this.bot.hears(CREATE_TASKS_PATTERN, async (ctx) => {
-      const { id: groupId, type } = ctx.chat;
-      const { id: userId } = ctx.from;
+      const { id: userId, first_name, last_name } = ctx.from;
       const { text: command } = ctx.message;
-
-      if (type !== 'group')
-        return ctx.reply('You must join group to execute commands.');
+      const fullName = `${first_name} ${last_name}`;
 
       try {
-        const isExistedUser = await this.isExistedInCache(userId, 'user');
+        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
 
-        if (!isExistedUser)
-          return ctx.reply(
-            'You have not registerd yet. (Please enter /help to get more infomation)',
+        if (!(await this.isExistedUser(userId)))
+          ctx.reply(
+            `User ${fullName} have not registerd yet. User must register by using command "/register".`,
           );
 
         const startDate = moment('6:00pm', 'h:mma');
         const endDate = moment('8:30am', 'h:mma').add(1, 'day');
-        const isBetweenDate = moment().isBetween(startDate, endDate);
 
-        if (!isBetweenDate)
-          return ctx.reply(
-            `You must use this command from "${startDate.format(
-              'DD/MM/YYYY hh:mm a',
-            )}" to "${endDate.format('DD/MM/YYYY hh:mm a')}".`,
-          );
+        const isBetweenDate = this.isBetweenDate(
+          startDate,
+          endDate,
+          fullName,
+          '/create-tasks',
+          ctx,
+        );
+
+        if (!isBetweenDate) return;
 
         const users = await pgClient
           .select()
           .from(userSchema)
           .where(eq(userSchema.id, `${userId}`));
 
-        if (!users[0].twitterProfileLink) {
+        if (!users[0].twitterProfileLink)
           return ctx.reply(
-            'You have not added twitter profile link yet. (Please enter /help to get more infomation)',
+            `User ${fullName} has not added twitter profile link yet. User must use command "/add-twitter-profile-link".`,
           );
-        }
 
         const links = command.trim().split(' ') as string[];
         links.shift();
@@ -169,36 +221,38 @@ export class TelegramBot {
 
         await pgClient.insert(taskSchema).values(newTasks);
 
-        return ctx.reply(`You created ${newTasks.length} task(s).`);
+        return ctx.reply(
+          `User ${fullName} created ${newTasks.length} task(s).`,
+        );
       } catch (error: any) {
         const errorMessage = error.stack as string;
 
         if (errorMessage.includes('duplicate'))
-          return ctx.reply('Your task(s) have already been created.');
+          return ctx.reply(
+            `Task(s) of user ${fullName} have already been created.`,
+          );
 
         console.log(
-          'User %s can not create tasks because of %s.',
+          'User %s (id: %s) can not create tasks because of %s.',
+          fullName,
           userId,
           error.stack,
         );
 
         return ctx.reply(
-          'You can not create tasks because server meets error.',
+          `User ${fullName} can not create tasks because server meets error.`,
         );
       }
     });
 
     this.bot.hears(GET_POINTS_PATTERN, async (ctx) => {
-      const { id: groupId, type } = ctx.chat;
-      const { id: userId } = ctx.from;
-      const { text: command } = ctx.message;
+      const { id: userId, first_name, last_name } = ctx.from;
+      const fullName = `${first_name} ${last_name}`;
 
       try {
-        const isExistedUser = await this.isExistedInCache(userId, 'user');
-
-        if (!isExistedUser)
-          return ctx.reply(
-            'You have not registerd yet. (Please enter /help to get more infomation)',
+        if (!(await this.isExistedUser(userId)))
+          ctx.reply(
+            `User ${fullName} have not registerd yet. User must register by using command "/register".`,
           );
 
         const [result] = await pgClient
@@ -211,46 +265,46 @@ export class TelegramBot {
           .where(eq(userSchema.id, `${userId}`))
           .limit(1);
 
-        return ctx.reply(
-          `User ${result.userFullName} has ${result.point} point(s).`,
-        );
+        return ctx.reply(`User ${fullName} has ${result.point} point(s).`);
       } catch (error: any) {
         console.log(
-          'User %s can not get point because of %s.',
+          'User %s (id: %s) can not get point because of %s.',
+          fullName,
           userId,
           error.stack,
         );
 
-        return ctx.reply('You can not get points because server meets error.');
+        return ctx.reply(
+          `User ${fullName} can not get points because server meets error.`,
+        );
       }
     });
 
     this.bot.hears(GET_TASKS_PATTERN, async (ctx) => {
-      const { id: groupId, type } = ctx.chat;
-      const { id: userId } = ctx.from;
-      const { text: command } = ctx.message;
-
-      if (type !== 'group')
-        return ctx.reply('You must join group to execute commands.');
+      const { id: groupId, title: groupName } = ctx.chat as any;
+      const { id: userId, first_name, last_name } = ctx.from;
+      const fullName = `${first_name} ${last_name}`;
 
       try {
-        const isExistedUser = await this.isExistedInCache(userId, 'user');
+        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
 
-        if (!isExistedUser)
-          return ctx.reply(
-            'You have not registerd yet. (Please enter /help to get more infomation)',
+        if (!(await this.isExistedUser(userId)))
+          ctx.reply(
+            `User ${fullName} have not registerd yet. User must register by using command "/register".`,
           );
 
         const startDate = moment('9:00am', 'h:mma');
         const endDate = moment('5:00pm', 'h:mma');
-        const isBetweenDate = moment().isBetween(startDate, endDate);
 
-        if (!isBetweenDate)
-          return ctx.reply(
-            `You must use this command from "${startDate.format(
-              'DD/MM/YYYY hh:mm a',
-            )}" to "${endDate.format('DD/MM/YYYY hh:mm a')}".`,
-          );
+        const isBetweenDate = this.isBetweenDate(
+          startDate,
+          endDate,
+          fullName,
+          '/get-tasks',
+          ctx,
+        );
+
+        if (!isBetweenDate) return;
 
         const [result] = await pgClient
           .select({
@@ -273,7 +327,9 @@ export class TelegramBot {
           );
 
         if (!tasks.length)
-          return ctx.reply('There are not any task(s) for you today.');
+          return ctx.reply(
+            `There are not any task(s) for user ${fullName} today.`,
+          );
 
         const assigement: Assignment = {
           userId: result.userId,
@@ -298,150 +354,194 @@ export class TelegramBot {
         );
       } catch (error: any) {
         console.log(
-          'User %s can not get tasks because of %s.',
+          'User %s (id: %s) can not get tasks because of %s.',
+          fullName,
           userId,
           error.stack,
         );
 
-        return ctx.reply('You can not get tasks because server meets error.');
+        return ctx.reply(
+          `User ${fullName} can not get tasks because server meets error.`,
+        );
       }
     });
 
     this.bot.hears(GET_TWITTER_COOKIES_PATTERN, async (ctx) => {
-      const { type } = ctx.chat;
-
-      if (type !== 'private')
-        return ctx.reply(
-          'You must chat to bot privately. (Please enter /help to get more infomation)',
-        );
-
-      let { text } = ctx.message;
-      text = text.split(' ')[1];
-
-      const [username, password] = text.split(':');
-
-      ctx.reply('Please wait in a few minutes...');
+      const { id: userId, first_name, last_name } = ctx.from;
+      const fullName = `${first_name} ${last_name}`;
 
       try {
+        if (!(await this.canExecuteCommand(ctx, 'private'))) return;
+
+        if (!(await this.isAdmin(userId)))
+          return ctx.reply(
+            `User ${fullName} not admin. So you can not use command "/get-twitter-cookies".`,
+          );
+
+        let { text } = ctx.message;
+        text = text.split(' ')[1];
+
+        const [username, password] = text.split(':');
+
+        ctx.reply('Please wait in a few minutes...');
+
         const token = await getTwitterCookies(username, password);
+
         return ctx.reply(`Twitter cookies:\n${JSON.stringify(token, null, 2)}`);
       } catch (error: any) {
-        console.log('Can not get twitter cookies because of %s', error.stack);
+        console.log('Fail to get twitter cookies because of %s', error.stack);
 
         return ctx.reply(
-          'Can not get twitter cookies because server meets error.',
+          'Fail to get twitter cookies because server meets error.',
         );
       }
     });
 
     this.bot.hears(REFRESH_TWITTER_COOKIES_PATTERN, async (ctx) => {
-      const { type } = ctx.chat;
-
-      if (type !== 'private')
-        return ctx.reply(
-          'You must chat to bot privately. (Please enter /help to get more infomation)',
-        );
-
-      const twitterCookies = await pgClient.select().from(twitterCookieSchema);
+      const { id: userId, first_name, last_name } = ctx.from;
+      const fullName = `${first_name} ${last_name}`;
       const key = `telegram_refresh_twitter_cookies`;
 
-      if (await redisClient.get(key))
-        return ctx.reply(
-          'Refreshed twitter cookies. Please try again in 2 hours later.',
-        );
+      try {
+        if (!(await this.canExecuteCommand(ctx, 'private'))) return;
 
-      await redisClient.set(key, true, 2 * 60 * 60); // Cache in 2 hours
-
-      ctx.reply('Please wait in a few minutes...');
-
-      for (const twitterCookie of twitterCookies) {
-        const cookies = await getTwitterCookies(
-          twitterCookie.username,
-          twitterCookie.password,
-        ).catch((error: any) => {
-          console.log(
-            'Fail to get twitter cookies of username %s because of %s',
-            twitterCookie.username,
-            error.stack,
+        if (!(await this.isAdmin(userId)))
+          return ctx.reply(
+            `User ${fullName} not admin. So you can not use command "/refresh-twitter-cookies".`,
           );
 
-          return null;
-        });
+        const twitterCookies = await pgClient
+          .select()
+          .from(twitterCookieSchema);
 
-        if (!cookies) {
-          ctx.reply(
-            `Fail to refresh twitter cookies of username ${twitterCookie.username}.`,
+        if (!twitterCookies.length)
+          return ctx.reply(
+            'There are not any twitter accounts. Please add twitter accounts before refreshing twitter cookies.',
           );
-          continue;
+
+        let numOfRefreshedCookies = 0;
+
+        if (await redisClient.get(key))
+          return ctx.reply(
+            'Refreshed twitter cookies. Please try again in 2 hours later.',
+          );
+
+        await redisClient.set(key, true, 2 * 60 * 60); // Cache in 2 hours
+
+        ctx.reply('Please wait in a few minutes...');
+
+        for (const twitterCookie of twitterCookies) {
+          const cookies = await getTwitterCookies(
+            twitterCookie.username as string,
+            twitterCookie.password,
+          ).catch((error: any) => {
+            console.log(
+              'Fail to get twitter cookies of username %s because of %s',
+              twitterCookie.username,
+              error.stack,
+            );
+
+            return null;
+          });
+
+          if (!cookies) {
+            await ctx.reply(
+              `Fail to refresh twitter cookies of username ${twitterCookie.username}.`,
+            );
+            continue;
+          }
+
+          await pgClient.update(twitterCookieSchema).set({ cookies });
+          numOfRefreshedCookies++;
         }
 
-        await pgClient.update(twitterCookieSchema).set({ cookies });
-      }
+        if (numOfRefreshedCookies <= 0) {
+          await redisClient.del([key]);
+          return ctx.reply('Please try refreshing twitter cookies again.');
+        }
 
-      return ctx.reply('Finshed to refresh twitter cookies.');
+        return ctx.reply(
+          `Finshed to refresh ${numOfRefreshedCookies} twitter cookies.`,
+        );
+      } catch (error: any) {
+        await redisClient.del([key]);
+
+        console.log(
+          'Fail to refresh twitter cookies because of: %s',
+          error.stack,
+        );
+
+        return ctx.reply(
+          'Fail to refresh twitter cookies because of server meets error.',
+        );
+      }
     });
 
     this.bot.hears(REGISTER_GROUP_PATTERN, async (ctx) => {
-      const { id: groupId, title, type } = ctx.chat as any;
-      const { id: userId } = ctx.from;
-      const { text: command } = ctx.message;
-
-      if (type !== 'group')
-        return ctx.reply('You must join group to execute commands.');
+      const { id: groupId, title: groupName } = ctx.chat as any;
+      const { id: userId, first_name, last_name } = ctx.from;
+      const fullName = `${first_name} ${last_name}`;
 
       try {
-        const isExistedGroup = await this.isExistedInCache(groupId, 'group');
+        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
 
-        if (isExistedGroup)
-          return ctx.reply('Group has been already registerd.');
+        if (!(await this.isAdmin(userId)))
+          return ctx.reply(
+            `User ${fullName} is not admin. So you can not use command "/register-group".`,
+          );
+
+        if (await this.isExistedGroup(groupId))
+          return ctx.reply(`Group ${groupName} have already registerd. `);
 
         const newGroup: NewGroup = {
           id: groupId,
-          groupName: title,
+          groupName,
         };
 
         await pgClient.insert(groupSchema).values(newGroup);
 
-        return ctx.reply('Group is registered successfully.');
+        return ctx.reply(`Group ${groupName} registered successfully.`);
       } catch (error: any) {
         console.log(
-          'Group %s can not register because of %s.',
+          'Group %s (id: %s) can not register because of %s.',
+          groupName,
           groupId,
           error.stack,
         );
 
-        return ctx.reply('Group can not register because server meets error.');
+        return ctx.reply(
+          `Group ${groupName} can not register because server meets error.`,
+        );
       }
     });
 
     this.bot.hears(REGISTER_USER_PATTERN, async (ctx) => {
-      const { id: groupId, type } = ctx.chat;
-      const { id: userId, first_name, last_name } = ctx.from;
-      const { text: command } = ctx.message;
-
-      if (type !== 'group')
-        return ctx.reply('You must join group to execute commands.');
+      const { id: groupId, title: groupName } = ctx.chat as any;
+      const { id: userId, first_name, last_name, username } = ctx.from;
+      const fullName = `${first_name} ${last_name}`;
 
       try {
-        const isExistedGroup = await this.isExistedInCache(groupId, 'group');
+        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
 
-        if (!isExistedGroup)
-          return ctx.reply('Group has been not registerd yet.');
+        if (!(await this.isExistedGroup(groupId)))
+          return ctx.reply(
+            `Group ${groupName} have not registerd yet. Admin must register by using command "/register-group".`,
+          );
 
-        const isExistedUser = await this.isExistedInCache(userId, 'user');
+        const [isExistedUser, isExistedResult] = await Promise.all([
+          this.isExistedUser(userId),
+          this.isExistedResult(userId),
+        ]);
 
         if (!isExistedUser) {
           const newUser: NewUser = {
             id: `${userId}`,
+            username: username || '',
             fullName: `${first_name} ${last_name}`,
           };
 
           await pgClient.insert(userSchema).values(newUser);
-
-          return ctx.reply('You have been already registerd.');
         }
-
-        const isExistedResult = await this.isExistedInCache(userId, 'result');
 
         if (!isExistedResult) {
           const newResult: NewResult = {
@@ -453,31 +553,119 @@ export class TelegramBot {
         }
 
         return isExistedUser && isExistedResult
-          ? ctx.reply('You have already registerd.')
-          : ctx.reply('You registered successfully.');
+          ? ctx.reply(`User ${fullName} has already registerd.`)
+          : ctx.reply(`User ${fullName} registered successfully.`);
       } catch (error: any) {
         console.log(
-          'User %s can not register because of %s.',
+          'User %s (id: %s) can not register because of %s.',
+          fullName,
           userId,
           error.stack,
         );
 
-        return ctx.reply('You can not register because server meets error.');
+        return ctx.reply(
+          `User ${fullName} can not register because server meets error.`,
+        );
       }
     });
 
-    this.bot.help((ctx) => {
-      ctx.reply(
-        'Sytax:\n' +
-          '1. Register user: /register\n' +
-          '2. Add twitter profile link: /add-twitter-profile-link "https://twitter.com/elonmusk"\n' +
-          '3. Create tasks: /create-tasks "https://twitter.com/elonmusk/status/1730331223992472029" "https://twitter.com/Bybit_Official/status/1729498119937622275"\n' +
-          '4. Get tasks (from 09:00 am to 05:00 pm): /get-tasks\n' +
-          '5. Get points: /get-points\n' +
-          '6. Register group (Admin): /register-group' +
-          '7. Refresh twitter cookies (Admin): /refresh-twitter-cookies',
-      );
+    this.bot.hears('/provide-info', (ctx) => {
+      console.log(ctx.from);
+      return ctx.reply('Received your info');
     });
+
+    this.bot.help(async (ctx) => {
+      const { type } = ctx.chat;
+      const { id: userId } = ctx.from;
+
+      const isAdmin = await this.isAdmin(userId).catch((error) => {
+        console.log(error);
+        return false;
+      });
+
+      const commandsInGroup =
+        'Commands are used in group:\n' +
+        '1. Resgister user: /register\n' +
+        '2. Add twitter profile link: /add-twitter-profile-link "https://twitter.com/elonmusk"\n ' +
+        '3. Create tasks: /create-tasks "https://twitter.com/elonmusk/status/1730331223992472029" "https://twitter.com/Bybit_Official/status/1729498119937622275"\n' +
+        '4. Get points: /get-points\n' +
+        '5. Get tasks (from 09:00 am to 05:00 pm): /get-tasks\n' +
+        '6. Register group (Just Admin): /register-group';
+
+      ctx.reply(commandsInGroup);
+
+      if (isAdmin && type === 'private') {
+        const commandsInBot =
+          'Commands are used in bot:\n' +
+          '1. Refresh twitter cookies: /refresh-twitter-cookies\n' +
+          '2. Add twitter accounts: /add-twitter-accounts "username1:password1" "username2:password2"';
+
+        ctx.reply(commandsInBot);
+      }
+    });
+  }
+
+  public async canExecuteCommand(
+    ctx: any,
+    _type: 'group' | 'private' | 'supergroup',
+  ): Promise<boolean> {
+    const { type } = ctx.chat;
+
+    if (type === _type) return true;
+
+    switch (_type) {
+      case 'group':
+        ctx.reply('You must join group to execute command.');
+        break;
+      case 'private':
+        ctx.reply(
+          `You must chat to "${await this.getBotName()}" to execute command.`,
+        );
+        break;
+      case 'supergroup':
+        ctx.reply('You must join group to execute command.');
+        break;
+      default:
+        ctx.reply(`Can not define type "${type}"`);
+    }
+
+    return false;
+  }
+
+  public async getBotName(): Promise<string> {
+    return (await this.bot.telegram.getMyName()).name;
+  }
+
+  private async isAdmin(userId: number | string): Promise<boolean> {
+    const [user] = await pgClient
+      .select({
+        isAdmin: userSchema.isAdmin,
+      })
+      .from(userSchema)
+      .where(eq(userSchema.id, `${userId}`))
+      .limit(1);
+
+    return user.isAdmin;
+  }
+
+  private isBetweenDate(
+    startDate: moment.Moment,
+    endDate: moment.Moment,
+    fullName: string,
+    command: string,
+    ctx: any,
+  ): boolean {
+    const isBetweenDate = moment().isBetween(startDate, endDate);
+
+    if (isBetweenDate) return true;
+
+    ctx.reply(
+      `User ${fullName} must use ${command} from "${startDate.format(
+        'DD/MM/YYYY hh:mm a',
+      )}" to "${endDate.format('DD/MM/YYYY hh:mm a')}".`,
+    );
+
+    return false;
   }
 
   private async isExistedInCache(
@@ -540,6 +728,21 @@ export class TelegramBot {
     isExisted && (await redisClient.set(key, true, TTL_IN_MS));
 
     return isExisted;
+  }
+
+  private async isExistedGroup(groupId: number | string): Promise<boolean> {
+    const isExistedGroup = await this.isExistedInCache(groupId, 'group');
+    return isExistedGroup;
+  }
+
+  private async isExistedUser(userId: number | string): Promise<boolean> {
+    const isExistedUser = await this.isExistedInCache(userId, 'user');
+    return isExistedUser;
+  }
+
+  private async isExistedResult(userId: number | string): Promise<boolean> {
+    const isExistedResult = await this.isExistedInCache(userId, 'result');
+    return isExistedResult;
   }
 
   public release(reason: string = 'Unknown'): void {
