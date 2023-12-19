@@ -73,7 +73,7 @@ export class TelegramBot {
       const twitterAccounts: NewTwitterCookie[] = [];
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'private'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['private']))) return;
 
         if (!(await this.isAdmin(userId)))
           return ctx.reply(
@@ -126,7 +126,8 @@ export class TelegramBot {
       const fullName = `${first_name} ${last_name}`;
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['group', 'supergroup'])))
+          return;
 
         if (!(await this.isExistedUser(userId)))
           ctx.reply(
@@ -169,7 +170,8 @@ export class TelegramBot {
       const fullName = `${first_name} ${last_name}`;
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['group', 'supergroup'])))
+          return;
 
         if (!(await this.isExistedUser(userId)))
           ctx.reply(
@@ -286,7 +288,8 @@ export class TelegramBot {
       const fullName = `${first_name} ${last_name}`;
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['group', 'supergroup'])))
+          return;
 
         if (!(await this.isExistedUser(userId)))
           ctx.reply(
@@ -371,7 +374,7 @@ export class TelegramBot {
       const fullName = `${first_name} ${last_name}`;
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'private'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['private']))) return;
 
         if (!(await this.isAdmin(userId)))
           return ctx.reply(
@@ -403,7 +406,7 @@ export class TelegramBot {
       const key = `telegram_refresh_twitter_cookies`;
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'private'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['private']))) return;
 
         if (!(await this.isAdmin(userId)))
           return ctx.reply(
@@ -483,7 +486,8 @@ export class TelegramBot {
       const fullName = `${first_name} ${last_name}`;
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['group', 'supergroup'])))
+          return;
 
         if (!(await this.isAdmin(userId)))
           return ctx.reply(
@@ -521,7 +525,8 @@ export class TelegramBot {
       const fullName = `${first_name} ${last_name}`;
 
       try {
-        if (!(await this.canExecuteCommand(ctx, 'group'))) return;
+        if (!(await this.canExecuteCommand(ctx, ['group', 'supergroup'])))
+          return;
 
         if (!(await this.isExistedGroup(groupId)))
           return ctx.reply(
@@ -607,23 +612,21 @@ export class TelegramBot {
 
   public async canExecuteCommand(
     ctx: any,
-    _type: 'group' | 'private' | 'supergroup',
+    types: ('group' | 'private' | 'supergroup')[],
   ): Promise<boolean> {
     const { type } = ctx.chat;
 
-    if (type === _type) return true;
+    if (types.filter((_type) => _type === type)) return true;
 
-    switch (_type) {
+    switch (type) {
       case 'group':
-        ctx.reply('You must join group to execute command.');
+        ctx.reply('You can not execute this command in private group.');
         break;
       case 'private':
-        ctx.reply(
-          `You must chat to "${await this.getBotName()}" to execute command.`,
-        );
+        ctx.reply('You can not execute this command in bot.');
         break;
       case 'supergroup':
-        ctx.reply('You must join group to execute command.');
+        ctx.reply('You can not execute this command in public group.');
         break;
       default:
         ctx.reply(`Can not define type "${type}"`);
